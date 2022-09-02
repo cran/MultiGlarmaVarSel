@@ -1,0 +1,182 @@
+---
+title: "MultiGlarmaVarSel package"
+author: "Marina Gomtsyan"
+date: " "
+output: pdf_document
+
+vignette: >
+ %\VignetteEngine{knitr::knitr}
+ %\VignetteIndexEntry{MultiGlarmaVarSel package}
+ %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+library(MultiGlarmaVarSel)
+library(ggplot2)
+library(formatR)
+set.seed(12345)
+```
+
+# Introduction
+The package \textsf{MultiGlarmaVarSel} provides functions for performing variable selection approach in sparse multivariate GLARMA models, which are pervasive for modeling multivariate discrete-valued time series. The method consists in iteratively combining the estimation of the autoregressive moving average (ARMA) coefficients of GLARMA models with regularized methods designed to perform variable selection in regression coefficients of Generalized Linear Models (GLM). For further details on the methodology we refer the reader to [1].
+
+We describe the multivariate GLARMA model. Given the past history $\mathcal{F}_{i,j,t-1} = \sigma(Y_{i,j,s}, s\leq t-1)$, we assume that
+\begin{equation}
+Y_{i,j,t} | \mathcal{F}_{i,j,t-1} \sim \mathcal{P}({\mu}_{i,j,t}^\star), 
+\label{eq1}
+\end{equation} 
+where $\mathcal{P}(\mu)$ denotes the Poisson distribution with mean $\mu$, $1 \leq i \leq I$, $1 \leq j \leq n_i$ and $1 \leq t \leq T$.
+For instance, $Y_{i,j,t}$ can be seen as a random variable modeling RNA-Seq data of the $j$th replication of gene $t$ obtained in condition $i$.
+In \eqref{eq1}
+\begin{equation}
+    \mu_{i,j,t}^\star = \exp (W_{i,j,t}^\star) \quad \text{with} \quad W_{i,j,t}^\star = \eta_{i,t}^\star+ Z_{i,j,t}^\star,
+    \label{eq2}
+\end{equation}
+where
+\begin{equation}
+Z_{i,j,t}^\star = \sum_{k=1}^q \gamma_k^\star E_{i,j,t}^\star, \quad \quad \text{with } 1 \leq q \leq \infty,
+\label{eq3}
+\end{equation}
+and $\eta_{i,t}^\star$, the non random part of $W_{i,j,t}^\star$, does not depend on $j$.
+
+Let us denote  $\pmb{\eta}^\star = (\eta_{1,1}^\star, \dots, \eta_{I,1}^\star,  \eta_{I,2}^\star, \dots, \eta_{I,T}^\star)'$ the vector of 
+coefficients corresponding to the effect of a qualitative variable on the observations.
+For instance, in the case of RNA-Seq data, $\eta_{i,t}^\star$ can be seen as the effect of condition $i$ on gene $t$. Assume moreover that $\pmb{\gamma}^\star =  (\gamma_{1}^\star , \dots, \gamma_{q}^\star )'$ is such that $\sum_{k\geq 1}|\gamma_k^\star|<\infty$, where
+$u'$ denotes the transpose of $u$. Additionally, 
+\begin{equation}
+E_{i,j,t}^\star = \frac{Y_{i,j,t} - \mu_{i,j,t}^\star}{\mu_{i,j,t}^\star} = Y_{i,j,t} \exp \big(-W_{i,j,t}^\star \big) - 1.
+\label{eq4}
+\end{equation}
+with $E_{i,j,t}^\star = 0$ for all $t \leq 0$ and $1 \leq q \leq \infty$. When $q=\infty$,  $Z_{i,j,t}^\star$ satisfies an ARMA-like recursion in \eqref{eq4},
+because causal ARMA can be written as MA process of infinite order.
+
+# Data generation
+In the following, we shall explain how to analyze the \verb|Y| dataset of observations provided within the package. 
+
+We load the dataset \verb|Y| provided within the package:
+```{r Y}
+data(Y)
+```
+
+The number of conditions $I$ is equal to $3$, the number of replications $J$ is equal to $100$ and the number of time points $T$ is equal to $15$. Data \verb|Y| is generated with $\pmb{\gamma}^{\star} = (0.5)$ and $\pmb{\eta^{\star}}$, such that all the $\eta_{i,t}^{\star}=0$ except for six of them: $\eta_{1,2}^{\star}=0.63$, $\eta_{2,4}^{\star}=2.62$, $\eta_{3,3}^{\star}=1.69$, $\eta_{3,4}^{\star}=2.27$, $\eta_{3,7}^{\star}=0.72$ and $\eta_{3,11}^{\star}=0.41$. The design matrix $X$ is the design matrix of one-way analysis of variance (ANOVA) with $I$ groups and $T$ observations.
+```{r dimensions}
+I=3
+J=100
+T=dim(Y)[2]
+q=1
+```
+
+```{r gamma}
+gamma = matrix(c(0.5), nrow = 1, ncol = q)
+```
+
+```{r eta}
+active=c(2, 24, 33, 34, 37, 41)
+non_active = setdiff(1:(I*T),active)
+eta_true=rep(0,(I*T))
+eta_true[active]=c(0.63, 2.62, 1.69, 2.27, 0.72, 0.41)
+```
+
+```{r X}
+X=matrix(0,nrow=(I*J),ncol=I)
+for (i in 1:I)
+{
+  X[((i-1)*J+1):(i*J),i]=rep(1,J)
+}
+```
+
+# Initialization
+We initialize  $\pmb{\gamma^{0}} = (0)$ and $\pmb{\eta^{0}}$ to be the coefficients estimated by \textsf{glm} function:
+```{r initial}
+gamma_0 = matrix(0, nrow = 1, ncol = q)
+eta_glm_mat_0 = matrix(0,ncol=T,nrow=I)
+for (t in 1:T)
+{
+  result_glm_0 = glm(Y[,t]~X-1,family=poisson(link='log'))
+  eta_glm_mat_0[,t]=as.numeric(result_glm_0$coefficients)
+}
+eta_0 = round(as.numeric(t(eta_glm_mat_0)),digits=6)
+```
+
+# Estimation of $\pmb{\gamma^{\star}}$
+We can estimate $\pmb{\gamma^{\star}}$ with the Newton-Raphson method. The output is the vector of estimation of $\pmb{\gamma^{\star}}$. The default number of iterations \verb|n_iter| of the Newton-Raphson algorithm is 100.
+```{r gamma_est}
+gamma_est=NR_gamma(Y, X, eta_0, gamma_0, I, J, n_iter = 100)
+cat("Estimated gamma: ", gamma_est, "\n")
+```
+  This estimation is obtained by taking initial values $\pmb{\gamma^{0}}$ and $\pmb{\eta^{0}}$, which can improve once we substitute the initial values by $\pmb{\hat{\gamma}}$ and $\pmb{\hat{\eta}}$ obtained by \verb|variable_selection| function.
+
+# Variable selection
+We perform variable selection and obtain the coefficients which are estimated to be active and the estimates of $\pmb{\gamma^{\star}}$ and $\pmb{\eta^{\star}}$. We take the number of iterations of the algorithm \verb|k_max| equal to 1. We take \verb|min| method (corresponding to the stability selection method with minimal $\lambda$), where \verb|threshold| is equal to $0.67$ and the number of replications \verb|nb_rep_ss| $=1000$. For more details about stability selection and the choice of parameters we refer the reader to [1].
+```{r variableSelection, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+result=variable_selection(Y, X, gamma_est, k_max=1, n_iter=100, method="min", nb_rep_ss=1000, threshold=0.67)
+estim_active = result$estim_active
+eta_est = result$eta_est
+gamma_est = result$gamma_est
+```
+
+```{r output, echo=FALSE, eval=TRUE}
+eta_data = data.frame(eta_est)
+eta_data$Condition = c(rep(1,T), rep(2,T), rep(3,T))
+eta_data$t = c(rep(seq(1,T,1),I))
+colnames(eta_data)[1] <- "eta"
+eta_data = eta_data[eta_data$eta!=0,]
+eta_true_data = data.frame(eta_true)
+colnames(eta_true_data)[1] <- "eta"
+eta_true_data$Condition = c(rep(1,T), rep(2,T), rep(3,T))
+eta_true_data$t = c(rep(seq(1,T,1),I))
+eta_true_data = eta_true_data[eta_true_data$eta !=0,]
+
+eta_data = eta_data[,2:3]
+eta_data_coef = noquote(apply(eta_data, 1, paste, collapse=","))
+eta_data_coef_print = noquote(paste0("(",eta_data_coef,")"))
+eta_true_data = eta_true_data[,2:3]
+eta_true_coef = noquote(apply(eta_true_data, 1, paste, collapse=","))
+eta_true_coef_print = noquote(paste0("(",eta_true_coef,")"))
+
+
+cat("True active coefficient pairs: ", eta_true_coef_print, "\n")
+cat("Estimated active coefficient pairs: ", eta_data_coef_print, "\n")
+cat("True values of elements : ", eta_true[active], "\n")
+cat("Estimated values of elements: ", round(eta_est[active], digits = 2), "\n")
+```
+
+# Ilustration of the estimation of $\pmb{\eta^{\star}}$
+We display a plot that illustrates which elements of $\pmb{\eta^{\star}}$ are selected to be active and how close the estimated value $\hat{\eta}_{i,t}$ is to the actual values $\eta_{i,t}^{\star}$. True values of  $\pmb{\eta^{\star}}$ are plotted in crosses and estimated values are plotted in dots.
+```{r plot, fig.align="center", fig.width=5, fig.height=3.5, tidy=FALSE, tidy.opts=list(width.cutoff=52)}
+#First, we make a dataset of estimated etas
+eta_df = data.frame(eta_est)
+eta_df$t = c(rep(seq(1,T,1),I))
+eta_df$I = c(rep(1,T), rep(2,T), rep(3,T))
+colnames(eta_df)[1] <- "eta"
+eta_df = eta_df[eta_df$eta!=0,]
+#Next, we make a dataset of true etas
+eta_t_df = data.frame(eta_true)
+colnames(eta_t_df)[1] <- "eta"
+eta_t_df$I = c(rep(1,T), rep(2,T), rep(3,T))
+eta_t_df$t = c(rep(seq(1,T,1),I))
+eta_t_df = eta_t_df[eta_t_df$eta !=0,]
+#Finally, we plot the result
+plot = ggplot()+
+  geom_point(data = eta_df, aes(x=t, y=I, color=eta), pch=20, size=3, stroke = 1)+
+  geom_point(data= eta_t_df, aes(x=t, y=I, color=eta), pch=4, size=4.5)+
+  scale_color_gradient2(name=expression(hat(eta)), midpoint=0, 
+                        low="steelblue", mid = "white", high ="red")+
+  theme_bw()+ylab('I')+xlab('T')+
+  theme(legend.position = "bottom")+
+  theme(legend.key.size = unit(0.5, 'cm'))+
+  theme(legend.title = element_text(size = 15, face="bold"))+
+  theme(legend.text = element_text(size = 7, color="black"))+
+  scale_y_continuous(breaks=seq(1, I, 1), limits=c(0, I))+
+  scale_x_continuous(breaks=c(1, seq(10, T, 10)), limits=c(0, T))+
+  theme(axis.text.x = element_text(angle = 90))+
+  theme(axis.text=element_text(size=10, color="black"))+
+  theme(axis.title=element_text(size=15,face="bold"))
+plot
+```
+
+**References**
+
+[1] M. Gomtsyan, C. Lévy-Leduc, S. Ouadah, L. Sansonnet, C. Bailly and L. Rajjou. "Variable selection in multivariate sparse GLARMA models: application to germination control by environment", arXiv:2208.14721
+
